@@ -77,6 +77,7 @@ async def shutdown():
 app.include_router(router)
 
 
+@app.get("/")
 @app.get("/health")
 async def health():
     return {"status": "ok"}
