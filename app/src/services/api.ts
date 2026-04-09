@@ -7,7 +7,7 @@ function getApiBase() {
   if (__DEV__ && debuggerHost) {
     return `http://${debuggerHost}:8080`;
   }
-  return "https://pricey-api.onrender.com";
+  return "https://pricey-7nsn.onrender.com";
 }
 
 function getWsBase() {
@@ -15,7 +15,7 @@ function getWsBase() {
   if (__DEV__ && debuggerHost) {
     return `ws://${debuggerHost}:8080`;
   }
-  return "wss://pricey-api.onrender.com";
+  return "wss://pricey-7nsn.onrender.com";
 }
 
 const API_BASE = getApiBase();

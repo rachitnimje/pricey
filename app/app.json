@@ -27,6 +27,12 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "583cb5c1-68ea-41b7-89b9-b8e2b22af2a6"
+      }
+    },
+    "owner": "rachitnimje-org"
   }
 }
