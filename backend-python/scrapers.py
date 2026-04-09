@@ -7,6 +7,7 @@ import random
 import re
 from typing import Optional
 
+import httpx
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 from models import ScrapedData
@@ -76,7 +77,43 @@ async def _ensure_browser():
 _CONTEXT_KWARGS = dict(
     viewport={"width": 1920, "height": 1080},
     java_script_enabled=True,
+    extra_http_headers={
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    },
 )
+
+# Shortened / redirect URL patterns that need resolving
+_REDIRECT_PATTERNS = re.compile(
+    r"dl\.flipkart\.com/s/|fkrt\.it/|amzn\.in/|bit\.ly/|tinyurl\.com/|t\.co/",
+    re.IGNORECASE,
+)
+
+
+async def _resolve_url(url: str) -> str:
+    """Follow redirects for shortened URLs to get the final destination."""
+    if not _REDIRECT_PATTERNS.search(url):
+        return url
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15,
+            headers={"User-Agent": get_user_agent()},
+        ) as client:
+            resp = await client.head(url)
+            final = str(resp.url)
+            if final != url:
+                logger.info(f"[scraper] resolved {url} → {final}")
+            return final
+    except Exception as e:
+        logger.warning(f"[scraper] URL resolve failed for {url}, using original: {e}")
+        return url
 
 _BROWSER_DEAD_PHRASES = (
     "Connection closed",
@@ -194,7 +231,22 @@ async def scrape_flipkart(url: str) -> ScrapedData:
     ctx = await _new_context()
     try:
         page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Stealth: override navigator properties to avoid bot detection
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            # Retry with networkidle on timeout
+            logger.warning(f"[flipkart] domcontentloaded timed out, retrying with networkidle: {url}")
+            await page.goto(url, wait_until="networkidle", timeout=45000)
+
         await page.wait_for_timeout(3000)
 
         # Flipkart uses React Native Web with randomized CSS classes.
@@ -370,8 +422,24 @@ async def scrape_reliance_digital(url: str) -> ScrapedData:
     ctx = await _new_context()
     try:
         page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Stealth: override navigator properties to avoid bot detection
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(5000)
+
+        # Check for access denied / captcha page and retry with longer wait
+        page_text_check = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
+        if "access denied" in page_text_check.lower() or "blocked" in page_text_check.lower():
+            logger.warning("[reliancedigital] access denied, retrying with networkidle")
+            await page.goto(url, wait_until="networkidle", timeout=45000)
+            await page.wait_for_timeout(5000)
 
         # Get all JSON-LD blocks (Product type has everything we need)
         json_ld_raw = await page.evaluate("""() => {
@@ -687,28 +755,30 @@ async def scrape_url(raw_url: str, use_ai: bool = False) -> tuple[str, ScrapedDa
     If use_ai is True and Groq is configured, runs traditional scrape
     and page-text extraction in parallel, then sends text to AI.
     """
-    site = detect_site(raw_url)
+    # Resolve shortened / redirect URLs first
+    resolved_url = await _resolve_url(raw_url)
+    site = detect_site(resolved_url)
     scraper_fn = _SCRAPERS.get(site)
     if scraper_fn is None:
         scraper_fn = scrape_generic
 
-    if use_ai and config.groq_api_key:
+    if use_ai and (config.sambanova_api_key or config.groq_api_key):
         # Run traditional scrape + page text extraction in parallel
         data, page_text = await asyncio.gather(
-            scraper_fn(raw_url),
-            _get_page_text(raw_url),
+            scraper_fn(resolved_url),
+            _get_page_text(resolved_url),
         )
         # AI enrichment (needs the page text, so sequential)
         try:
             if page_text:
-                ai_data = await extract_with_ai(page_text, raw_url)
+                ai_data = await extract_with_ai(page_text, resolved_url)
                 if ai_data:
                     data = merge_ai_data(data, ai_data)
-                    logger.info(f"[scraper] AI-enriched {raw_url}")
+                    logger.info(f"[scraper] AI-enriched {resolved_url}")
         except Exception as e:
-            logger.warning(f"[scraper] AI enrichment failed for {raw_url}: {e}")
+            logger.warning(f"[scraper] AI enrichment failed for {resolved_url}: {e}")
     else:
-        data = await scraper_fn(raw_url)
+        data = await scraper_fn(resolved_url)
 
     return site, data
 
@@ -718,7 +788,14 @@ async def _get_page_text(url: str) -> str:
     ctx = await _new_context()
     try:
         page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            window.chrome = { runtime: {} };
+        """)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            await page.goto(url, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(2000)
         text = await page.evaluate("""() => {
             // Remove scripts, styles, nav, footer
