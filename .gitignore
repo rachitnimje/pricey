@@ -1,0 +1,36 @@
+# Dependencies
+app/node_modules/
+backend-python/__pycache__/
+backend-python/*.pyc
+
+# Expo
+app/.expo/
+app/dist/
+
+# Environment
+backend-python/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build outputs
+app/android/
+app/ios/
+*.apk
+*.aab
+*.ipa
+
+# Python
+*.egg-info/
+*.egg
+.venv/
+venv/
+.github/
+figma/
+plan/
+.expo/
