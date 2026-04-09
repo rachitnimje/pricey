@@ -182,8 +182,8 @@ class AlertService:
             await aiosmtplib.send(
                 msg,
                 hostname="smtp.gmail.com",
-                port=587,
-                start_tls=True,
+                port=465,
+                use_tls=True,
                 username=config.gmail_address,
                 password=config.gmail_app_password,
             )
